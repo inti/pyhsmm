@@ -1,6 +1,6 @@
 from __future__ import division
 import numpy as np
-import itertools, collections, operator, random
+import itertools, collections, operator, random, abc
 from matplotlib import pyplot as plt
 from matplotlib import cm
 
@@ -503,20 +503,8 @@ class HSMMPossibleChangepoints(HSMM, ModelGibbsSampling):
 class HSMMGeoApproximation(HSMM):
     _states_class = states.HSMMStatesGeoApproximation
 
-class HSMMIntNegBin(HSMM, HMMEigen):
-    _states_class = states.HSMMStatesIntegerNegativeBinomial
-
-    def __init__(self,obs_distns,dur_distns,*args,**kwargs):
-        assert all(isinstance(d,basic.distributions.NegativeBinomialIntegerR) for d in dur_distns), \
-                'duration distributions must be instances of NegativeBinomialIntegerR'
-        super(HSMMIntNegBin,self).__init__(obs_distns,dur_distns,*args,**kwargs)
-
-    def log_likelihood(self,data):
-        # needs to use messages, so we need to know to act like an HMM
-        s = self._states_class(model=self,data=np.asarray(data,dtype=np.float64),
-                stateseq=np.zeros(len(data))) # placeholder
-        betal = s.messages_backwards_hmm()
-        return np.logaddexp.reduce(np.log(self.init_state_distn.pi_0) + betal[0] + s.aBl[0])
+class _HSMMIntNegBinBase(HSMM, HMMEigen):
+    __metaclass__ = abc.ABCMeta
 
     def EM_step(self):
         # needs to use HMM messages that the states objects give us (only betal)
@@ -525,8 +513,47 @@ class HSMMIntNegBin(HSMM, HMMEigen):
         raise NotImplementedError # TODO
 
     def Viterbi_EM_step(self):
-        HMMEigen.Viterbi_EM_step(self)
+        self._clear_caches()
+
+        ## Viterbi step
+        for s in self.states_list:
+            s.Viterbi()
+
+        ## M step
+        for state, distn in enumerate(self.obs_distns):
+            distn.max_likelihood([s.data[s.stateseq == state] for s in self.states_list])
+
+        self.init_state_distn.max_likelihood(
+                np.array([s.stateseq[0] for s in self.states_list]))
+
+        # this is the only difference from parent's Viterbi_EM_step: use
+        # stateseq_norep
+        self.trans_distn.max_likelihood([s.stateseq_norep for s in self.states_list])
 
         for state, distn in enumerate(self.dur_distns):
             distn.max_likelihood([s.durations[:-1][s.stateseq_norep[:-1] == state] for s in self.states_list])
+
+    def log_likelihood(self,data):
+        s = self._states_class(model=self,data=np.asarray(data,dtype=np.float64),
+                stateseq=np.zeros(len(data))) # placeholder
+        betal,_ = s.messages_backwards()
+        return np.logaddexp.reduce(np.log(s.pi_0) + betal[0] + s.aBl[0])
+
+class HSMMIntNegBinVariant(_HSMMIntNegBinBase):
+    _states_class = states.HSMMStatesIntegerNegativeBinomialVariant
+
+    def __init__(self,obs_distns,dur_distns,*args,**kwargs):
+        assert all(isinstance(d,basic.distributions.NegativeBinomialIntegerRVariantDuration) or
+                   isinstance(d,basic.distributions.NegativeBinomialFixedRVariantDuration)
+                   for d in dur_distns)
+        super(HSMMIntNegBinVariant,self).__init__(obs_distns,dur_distns,*args,**kwargs)
+
+class HSMMIntNegBin(_HSMMIntNegBinBase):
+    _states_class = states.HSMMStatesIntegerNegativeBinomial
+
+    def __init__(self,obs_distns,dur_distns,*args,**kwargs):
+        assert all(isinstance(d,basic.distributions.NegativeBinomialIntegerRDuration) or
+                   isinstance(d,basic.distributions.NegativeBinomialFixedRDuration)
+                   for d in dur_distns)
+        super(HSMMIntNegBin,self).__init__(obs_distns,dur_distns,*args,**kwargs)
 
